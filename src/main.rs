@@ -1,4 +1,3 @@
-#![crate_name = "commander"]
 #![license = "MIT"]
 
 #![feature(globs)]
