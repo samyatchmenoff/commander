@@ -1,20 +1,31 @@
 #![license = "MIT"]
 
 #![feature(globs)]
+#![feature(default_type_params)]
 
 extern crate graphics;
 extern crate piston;
 extern crate glfw_game_window;
 extern crate opengl_graphics;
 extern crate cgmath;
+extern crate openal;
+extern crate libvorbisfile;
 
+use std::i16;
 use std::rand;
 use std::iter::FromIterator;
-use std::collections::HashMap;
+use std::collections::{HashMap,HashSet};
+use std::default::Default;
+use std::hash::{Hash,Hasher};
+use std::io::File;
 use graphics::*;
 use piston::{Game, GameWindow};
-
 use cgmath::vector::{Vector, Vector2, EuclideanVector};
+use cgmath::point::Point;
+use cgmath::aabb::{Aabb, Aabb2};
+use openal::al;
+use openal::alc;
+use vorbis = libvorbisfile;
 
 static MISSILE_COOLDOWN: uint = 60;
 static MISSILE_LIFETIME: uint = 90;
@@ -57,7 +68,7 @@ impl Missile {
 #[deriving(Show)]
 struct Ship {
   name: String,
-  owner: Option<String>,
+  owner: String,
   hull_health: uint,
   shield_health: uint,
   missile_cooldown: uint,
@@ -67,10 +78,10 @@ struct Ship {
 }
 
 impl Ship {
-  fn new(name: &str, owner: Option<&str>, pos: Vector2<f64>) -> Ship {
+  fn new(name: &str, owner: &str, pos: Vector2<f64>) -> Ship {
     Ship {
       name: name.to_string(),
-      owner: owner.map(|s| s.to_string()),
+      owner: owner.to_string(),
       hull_health: 100,
       shield_health: 100,
       missile_cooldown: MISSILE_COOLDOWN,
@@ -103,7 +114,7 @@ impl<'r> Universe {
     Universe {
       ships: FromIterator::from_iter(
         Vec::from_fn(10, |i| {
-          let (name, owner) = if i % 2 == 0 { ("Player", Some("player")) } else { ("Enemy", Some("enemy")) };
+          let (name, owner) = if i % 2 == 0 { ("Player", "player") } else { ("Enemy", "enemy") };
           (i, Ship::new(name, owner, Vector2::new(rand::random::<f64>() * 600.0 + 100.0, rand::random::<f64>() * 400.0 + 100.0)))
         }).move_iter()
       ),
@@ -113,13 +124,17 @@ impl<'r> Universe {
 }
 
 struct InputState {
-  mouse_position: Vector2<f64>
+  mouse_position: Vector2<f64>,
+  mouse_press_position: Vector2<f64>,
+  mouse_button_state: HashMap<piston::mouse::Button,bool>
 }
 
 impl InputState {
   fn new() -> InputState {
     InputState {
-      mouse_position: Vector2::zero()
+      mouse_position: Vector2::zero(),
+      mouse_press_position: Vector2::zero(),
+      mouse_button_state: HashMap::new()
     }
   }
 }
@@ -132,24 +147,37 @@ enum GameState {
 pub struct App<'r> {
   game_state: GameState,
   universe: Universe,
-  selected_ship_id: Option<uint>,
+  selected_ships: HashSet<uint>,
   input_state: InputState,
   gl: opengl_graphics::Gl,
+  al_device: alc::Device,
+  al_ctx: alc::Context,
   colors: HashMap<String,(f32,f32,f32)>,
+  sounds: HashMap<String,al::Source>
 }
 
 impl<'r> App<'r> {
   fn new() -> App<'r> {
+    let al_device = alc::Device::open(None).expect("Could not open audio device");
+    let al_ctx = al_device.create_context([]).expect("Could not create OpenAL context");
+    al_ctx.make_current();
+
     let mut colors = HashMap::new();
     colors.insert("player".to_string(), (1.0, 1.0, 0.3));
     colors.insert("enemy".to_string(), (1.0, 0.3, 0.3));
+    let mut sounds = HashMap::new();
+    sounds.insert("shoot".to_string(), load_sound("shoot.ogg"));
+
     App {
       game_state: Simulating,
       universe: Universe::new(),
-      selected_ship_id: None,
+      selected_ships: HashSet::new(),
       input_state: InputState::new(),
       gl: opengl_graphics::Gl::new(),
-      colors: colors
+      al_device: al_device,
+      al_ctx: al_ctx,
+      colors: colors,
+      sounds: sounds
     }
   }
 }
@@ -159,6 +187,8 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
     match self.game_state {
       Paused => {},
       Simulating => {
+        let mut did_shoot = false;
+
         let ship_inputs: HashMap<uint,ShipInput> = FromIterator::from_iter(
           self.universe.ships.iter().map(|(&ship_id, ship)| {
             let (target_pos, shoot) = match ship.command {
@@ -205,6 +235,7 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
             ship.pos = ship.pos + ship.vel.div_s(60.0);
             match (input.shoot, ship.missile_cooldown == 0) {
               (Some(target_ship_id), true) => {
+                did_shoot = true;
                 missiles.push(Missile::new(ship.pos, target_ship_id));
                 ship.missile_cooldown = MISSILE_COOLDOWN;
               }
@@ -233,6 +264,10 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
         }
 
         missiles.retain(|m| { m.age < MISSILE_LIFETIME });
+
+        if did_shoot {
+          self.sounds.find_mut(&"shoot".to_string()).unwrap().play();
+        }
       }
     }
   }
@@ -246,7 +281,7 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
 
     for ship in self.universe.ships.values() {
       let colors = &self.colors;
-      let (r,g,b) = ship.owner.clone().and_then(|o| colors.find(&o)).unwrap_or(&(1.0, 1.0, 1.0)).clone();
+      let (r,g,b) = colors.find(&ship.owner).unwrap_or(&(1.0, 1.0, 1.0)).clone();
       c.rect(ship.pos.x - 5.0, ship.pos.y - 5.0, 10.0, 10.0).rgb(r, g, b).draw(&mut self.gl);
 
       match ship.command {
@@ -284,19 +319,14 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
       };
     }
 
-    match self.selected_ship_id {
-      Some(ship_id) => {
-        match self.universe.ships.find(&ship_id) {
-          Some(ship) => {
-            c.circle(ship.pos.x, ship.pos.y, SELECT_RADIUS).rgba(0.7, 1.0, 0.7, 0.4).draw(&mut self.gl);
-          }
-          None => {
-            self.selected_ship_id = None
-          }
+    for ship_id in self.selected_ships.iter() {
+      match self.universe.ships.find(ship_id) {
+        Some(ship) => {
+          c.circle(ship.pos.x, ship.pos.y, SELECT_RADIUS).rgba(0.7, 1.0, 0.7, 0.4).draw(&mut self.gl);
         }
+        None => {}
       }
-      None => {}
-    };
+    }
 
     match ship_at_pos(self.universe.ships.iter(), self.input_state.mouse_position) {
       Some((_, ship)) => {
@@ -309,6 +339,32 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
 
     for m in self.universe.missiles.iter() {
       c.circle(m.pos.x, m.pos.y, 5.0).rgba(1.0, 1.0, 1.0, 1.0).draw(&mut self.gl);
+    }
+
+    if self.input_state.mouse_button_state.find_or_default(&piston::mouse::Left) == true {
+      let select_rect: Aabb2<f64> = Aabb2::new(
+        Point::from_vec(&self.input_state.mouse_position),
+        Point::from_vec(&self.input_state.mouse_press_position)
+      );
+      for ship in self.universe.ships.values() {
+        if ship.owner.as_slice() == "player" && select_rect.contains(&Point::from_vec(&ship.pos)) {
+          c.rect(ship.pos.x - SELECT_RADIUS, ship.pos.y - SELECT_RADIUS, SELECT_RADIUS * 2.0, SELECT_RADIUS * 2.0)
+            .rgba(0.7, 0.5, 1.0, 0.3)
+            .draw(&mut self.gl);
+        }
+      }
+      c.rect(
+        self.input_state.mouse_position.x,
+        self.input_state.mouse_position.y,
+        self.input_state.mouse_press_position.x - self.input_state.mouse_position.x,
+        self.input_state.mouse_press_position.y - self.input_state.mouse_position.y
+      ).rgba(0.5, 0.5, 0.6, 0.5).draw(&mut self.gl);
+      c.rect(
+        self.input_state.mouse_position.x,
+        self.input_state.mouse_position.y,
+        self.input_state.mouse_press_position.x - self.input_state.mouse_position.x,
+        self.input_state.mouse_press_position.y - self.input_state.mouse_position.y
+      ).border_radius(1.0).rgba(0.5, 0.5, 0.6, 1.0).draw(&mut self.gl);
     }
   }
 
@@ -324,47 +380,54 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
     }
   }
 
-  fn mouse_press(&mut self, _window: &mut W, args: &piston::MousePressArgs) {
-    let pos = self.input_state.mouse_position;
+  fn mouse_release(&mut self, _window: &mut W, args: &piston::MouseReleaseArgs) {
+    self.input_state.mouse_button_state.insert(args.button, false);
 
-    let ship_command = {
-      let selected = ship_at_pos(self.universe.ships.iter(), pos);
-      match (self.selected_ship_id, selected, args.button) {
-        // Ship selection
-        (_, Some((&new_ship_id, new_ship)), piston::mouse::Left) => {
-          if new_ship.owner.as_ref().map(|r| r.as_slice()) == Some("player") {
-            self.selected_ship_id = Some(new_ship_id);
-            None
-          } else {
-            self.selected_ship_id = None;
-            None
-          }
-        }
-        // Attacking / Following
-        (Some(cur_ship_id), Some((&new_ship_id, new_ship)), piston::mouse::Right) => {
-          if new_ship.owner.as_ref().map(|r| r.as_slice()) != Some("player") {
-            Some((cur_ship_id, cmd::Attack(new_ship_id)))
-          } else {
-            Some((cur_ship_id, cmd::Follow(new_ship_id)))
-          }
-        }
-        // Movement
-        (Some(cur_ship_id), _, piston::mouse::Right) => {
-          Some((cur_ship_id, cmd::Goto(self.input_state.mouse_position)))
-        }
-        // Deselection
-        _ => {
-          self.selected_ship_id = None;
+    if args.button == piston::mouse::Left {
+      let select_rect: Aabb2<f64> = Aabb2::new(
+        Point::from_vec(&self.input_state.mouse_position),
+        Point::from_vec(&self.input_state.mouse_press_position)
+      );
+
+      self.selected_ships = self.universe.ships.iter().filter_map(|(ship_id, ship)| {
+        if ship.owner.as_slice() == "player" && select_rect.contains(&Point::from_vec(&ship.pos)) {
+          Some(*ship_id)
+        } else {
           None
         }
-      }
-    };
+      }).collect();
+    }
+  }
 
-    ship_command.with(|(ship_id, command)| {
-      self.universe.ships.find_mut(&ship_id).with(|s| {
-        s.command = Some(command);
-      })
-    });
+  fn mouse_press(&mut self, _window: &mut W, args: &piston::MousePressArgs) {
+    self.input_state.mouse_button_state.insert(args.button, true);
+    self.input_state.mouse_press_position = self.input_state.mouse_position;
+
+    let pos = self.input_state.mouse_position;
+
+    if args.button == piston::mouse::Right {
+      let command = {
+        let selected = ship_at_pos(self.universe.ships.iter(), pos);
+        match selected {
+          Some((&new_ship_id, new_ship)) => {
+            if new_ship.owner.as_slice() == "player" {
+              cmd::Follow(new_ship_id)
+            } else {
+              cmd::Attack(new_ship_id)
+            }
+          }
+          None => {
+            cmd::Goto(self.input_state.mouse_position)
+          }
+        }
+      };
+
+      for ship_id in self.selected_ships.iter() {
+        self.universe.ships.find_mut(ship_id).with(|s| {
+          s.command = Some(command);
+        });
+      }
+    }
   }
 
   fn mouse_move(&mut self, _window: &mut W, args: &piston::MouseMoveArgs) {
@@ -412,4 +475,38 @@ impl<T> With<T> for Option<T> {
   fn with(self, f: |T|) {
     for x in self.move_iter() { f(x); }
   }
+}
+
+trait FindOrDefault<K,V> {
+  fn find_or_default(&self, key: &K) -> V;
+}
+
+impl<K: Eq + Hash<S>, V: Default + Clone, S, H: Hasher<S>> FindOrDefault<K,V> for HashMap<K,V,H> {
+  fn find_or_default(&self, key: &K) -> V {
+    self.find_copy(key).unwrap_or_default()
+  }
+}
+
+fn load_sound(filename: &str) -> al::Source {
+  use std::slice::Vector;
+  let mut stream = File::open(&Path::new(filename)).unwrap();
+  let mut vf = vorbis::VorbisFile::new(stream).unwrap();
+  let mut samples: Vec<i16> = Vec::new();
+  loop {
+    match vf.decode() {
+      Ok(channels) => {
+        samples.push_all_move(channels[0].iter().map(|x| (x * (i16::MAX - 1) as f32) as i16).collect());
+      }
+      _ => {
+        break;
+      }
+    }
+  }
+  let buffer = al::Buffer::gen();
+  let sample_freq: f32 = 44100.0;
+  unsafe { buffer.buffer_data(al::FormatMono16, samples.as_slice(), sample_freq as al::ALsizei) };
+
+  let source = al::Source::gen();
+  source.queue_buffer(&buffer);
+  return source;
 }

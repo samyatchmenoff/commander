@@ -17,3 +17,9 @@ git = "https://github.com/samyatchmenoff/glfw_game_window.git"
 
 [dependencies.opengl_graphics]
 git = "https://github.com/PistonDevelopers/opengl_graphics.git"
+
+[dependencies.libvorbisfile]
+git = "https://github.com/tari/vorbisfile.rs.git"
+
+[dependencies.openal-rs]
+git = "https://github.com/bjz/openal-rs.git"
