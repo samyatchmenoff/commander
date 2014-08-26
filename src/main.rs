@@ -19,13 +19,14 @@ use std::default::Default;
 use std::hash::{Hash,Hasher};
 use std::io::File;
 use graphics::*;
-use piston::{Game, GameWindow};
-use cgmath::vector::{Vector, Vector2, EuclideanVector};
-use cgmath::point::Point;
-use cgmath::aabb::{Aabb, Aabb2};
+use piston::{GameIterator, GameWindow};
+use piston::input::keyboard;
+use cgmath::{Vector, Vector2, EuclideanVector};
+use cgmath::Point;
+use cgmath::{Aabb, Aabb2};
 use openal::al;
 use openal::alc;
-use vorbis = libvorbisfile;
+use libvorbisfile as vorbis;
 
 static MISSILE_COOLDOWN: uint = 60;
 static MISSILE_LIFETIME: uint = 90;
@@ -93,7 +94,7 @@ impl Ship {
 }
 
 mod cmd {
-  use cgmath::vector::Vector2;
+  use cgmath::Vector2;
 
   #[deriving(Show)]
   pub enum Command {
@@ -126,7 +127,7 @@ impl<'r> Universe {
 struct InputState {
   mouse_position: Vector2<f64>,
   mouse_press_position: Vector2<f64>,
-  mouse_button_state: HashMap<piston::mouse::Button,bool>
+  mouse_button_state: HashMap<piston::input::mouse::Button,bool>
 }
 
 impl InputState {
@@ -182,8 +183,8 @@ impl<'r> App<'r> {
   }
 }
 
-impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
-  fn update(&mut self, _window: &mut W, _args: &piston::UpdateArgs) {
+impl<'r> App<'r> {
+  fn update(&mut self) {
     match self.game_state {
       Paused => {},
       Simulating => {
@@ -272,7 +273,7 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
     }
   }
 
-  fn render(&mut self, _window: &mut W, args: &piston::RenderArgs) {
+  fn render(&mut self, args: &piston::RenderArgs) {
     self.gl.viewport(0, 0, 2 * args.width as i32, 2 * args.height as i32);
 
     let ref c = Context::abs(args.width as f64, args.height as f64);
@@ -341,7 +342,7 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
       c.circle(m.pos.x, m.pos.y, 5.0).rgba(1.0, 1.0, 1.0, 1.0).draw(&mut self.gl);
     }
 
-    if self.input_state.mouse_button_state.find_or_default(&piston::mouse::Left) == true {
+    if self.input_state.mouse_button_state.find_or_default(&piston::input::mouse::Left) == true {
       let select_rect: Aabb2<f64> = Aabb2::new(
         Point::from_vec(&self.input_state.mouse_position),
         Point::from_vec(&self.input_state.mouse_press_position)
@@ -368,22 +369,22 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
     }
   }
 
-  fn key_press(&mut self, _window: &mut W, args: &piston::KeyPressArgs) {
-    match (self.game_state, args.key) {
-      (Paused, piston::keyboard::Space) => {
+  fn key_press(&mut self, key: piston::input::keyboard::Key) {
+    match (self.game_state, key) {
+      (Paused, piston::input::keyboard::Space) => {
         self.game_state = Simulating;
       }
-      (Simulating, piston::keyboard::Space) => {
+      (Simulating, piston::input::keyboard::Space) => {
         self.game_state = Paused;
       }
       _ => {}
     }
   }
 
-  fn mouse_release(&mut self, _window: &mut W, args: &piston::MouseReleaseArgs) {
-    self.input_state.mouse_button_state.insert(args.button, false);
+  fn mouse_release(&mut self, button: piston::input::mouse::Button) {
+    self.input_state.mouse_button_state.insert(button, false);
 
-    if args.button == piston::mouse::Left {
+    if button == piston::input::mouse::Left {
       let select_rect: Aabb2<f64> = Aabb2::new(
         Point::from_vec(&self.input_state.mouse_position),
         Point::from_vec(&self.input_state.mouse_press_position)
@@ -399,13 +400,13 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
     }
   }
 
-  fn mouse_press(&mut self, _window: &mut W, args: &piston::MousePressArgs) {
-    self.input_state.mouse_button_state.insert(args.button, true);
+  fn mouse_press(&mut self, button: piston::input::mouse::Button) {
+    self.input_state.mouse_button_state.insert(button, true);
     self.input_state.mouse_press_position = self.input_state.mouse_position;
 
     let pos = self.input_state.mouse_position;
 
-    if args.button == piston::mouse::Right {
+    if button == piston::input::mouse::Right {
       let command = {
         let selected = ship_at_pos(self.universe.ships.iter(), pos);
         match selected {
@@ -430,8 +431,8 @@ impl<'r, W: GameWindow> piston::Game<W> for App<'r> {
     }
   }
 
-  fn mouse_move(&mut self, _window: &mut W, args: &piston::MouseMoveArgs) {
-    self.input_state.mouse_position = Vector2::new(args.x, args.y);
+  fn mouse_move(&mut self, x: f64, y: f64) {
+    self.input_state.mouse_position = Vector2::new(x, y);
   }
 }
 
@@ -450,6 +451,7 @@ fn ship_at_pos<'r, I: Iterator<(&'r uint, &'r Ship)>>(iter: I, pos: Vector2<f64>
 
 fn main() {
   let mut window = glfw_game_window::GameWindowGLFW::new(
+    piston::shader_version::opengl::OpenGL_3_2,
     piston::GameWindowSettings {
       title: "Spaceships".to_string(),
       size: [800, 600],
@@ -464,8 +466,19 @@ fn main() {
     max_frames_per_second: 60
   };
 
-  app.run(&mut window, &game_iter_settings);
+  for e in GameIterator::new(&mut window, &game_iter_settings) {
+    match e {
+      piston::Render(args) => app.render(&args),
+      piston::Update(_) => app.update(),
+      piston::Input(piston::input::KeyPress { key: key }) => app.key_press(key),
+      piston::Input(piston::input::MousePress { button: button }) => app.mouse_press(button),
+      piston::Input(piston::input::MouseRelease { button: button }) => app.mouse_release(button),
+      piston::Input(piston::input::MouseMove { x: x, y: y, draw_x: _, draw_y: _ }) => app.mouse_move(x, y),
+      piston::Input(_) => ()
+    }
+  }
 }
+
 
 trait With<T> {
   fn with(self, f: |T|);
@@ -488,7 +501,7 @@ impl<K: Eq + Hash<S>, V: Default + Clone, S, H: Hasher<S>> FindOrDefault<K,V> fo
 }
 
 fn load_sound(filename: &str) -> al::Source {
-  use std::slice::Vector;
+  use std::slice::Slice;
   let mut stream = File::open(&Path::new(filename)).unwrap();
   let mut vf = vorbis::VorbisFile::new(stream).unwrap();
   let mut samples: Vec<i16> = Vec::new();
