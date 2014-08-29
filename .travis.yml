@@ -9,7 +9,7 @@ install:
   - make
   - sudo make install
   - cd ..
-  - curl http://www.rust-lang.org/rustup.sh | sudo -E sh
+  - curl -s https://static.rust-lang.org/rustup.sh | sudo -E sh
   - rustc -v
 script:
   - cargo build
