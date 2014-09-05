@@ -19,8 +19,7 @@ use std::default::Default;
 use std::hash::{Hash,Hasher};
 use std::io::File;
 use graphics::*;
-use piston::{GameIterator, GameWindow};
-use piston::input::keyboard;
+use piston::EventIterator;
 use cgmath::{Vector, Vector2, EuclideanVector};
 use cgmath::Point;
 use cgmath::{Aabb, Aabb2};
@@ -450,30 +449,31 @@ fn ship_at_pos<'r, I: Iterator<(&'r uint, &'r Ship)>>(iter: I, pos: Vector2<f64>
 }
 
 fn main() {
-  let mut window = glfw_game_window::GameWindowGLFW::new(
+  let mut window = glfw_game_window::WindowGLFW::new(
     piston::shader_version::opengl::OpenGL_3_2,
-    piston::GameWindowSettings {
-      title: "Spaceships".to_string(),
+    piston::WindowSettings {
+      title: "Commander".to_string(),
       size: [800, 600],
       fullscreen: false,
-      exit_on_esc: true
+      exit_on_esc: true,
+      samples: 1
     }
   );
 
   let mut app = App::new();
-  let game_iter_settings = piston::GameIteratorSettings {
+  let game_iter_settings = piston::EventSettings {
     updates_per_second: 60,
     max_frames_per_second: 60
   };
 
-  for e in GameIterator::new(&mut window, &game_iter_settings) {
+  for e in EventIterator::new(&mut window, &game_iter_settings) {
     match e {
       piston::Render(args) => app.render(&args),
       piston::Update(_) => app.update(),
-      piston::Input(piston::input::KeyPress { key: key }) => app.key_press(key),
-      piston::Input(piston::input::MousePress { button: button }) => app.mouse_press(button),
-      piston::Input(piston::input::MouseRelease { button: button }) => app.mouse_release(button),
-      piston::Input(piston::input::MouseMove { x: x, y: y, draw_x: _, draw_y: _ }) => app.mouse_move(x, y),
+      piston::Input(piston::input::Press(piston::input::Keyboard(key))) => app.key_press(key),
+      piston::Input(piston::input::Press(piston::input::Mouse(button))) => app.mouse_press(button),
+      piston::Input(piston::input::Release(piston::input::Mouse(button))) => app.mouse_release(button),
+      piston::Input(piston::input::Move(piston::input::MouseCursor(x, y))) => app.mouse_move(x, y),
       piston::Input(_) => ()
     }
   }

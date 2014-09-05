@@ -1,3 +1,4 @@
+language: rust
 before_install:
   - sudo apt-get update -qq
 install:
@@ -9,7 +10,4 @@ install:
   - make
   - sudo make install
   - cd ..
-  - curl -s https://static.rust-lang.org/rustup.sh | sudo -E sh
   - rustc -v
-script:
-  - cargo build
