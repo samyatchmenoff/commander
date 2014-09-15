@@ -173,7 +173,7 @@ impl<'r> App<'r> {
       universe: Universe::new(),
       selected_ships: HashSet::new(),
       input_state: InputState::new(),
-      gl: opengl_graphics::Gl::new(),
+      gl: opengl_graphics::Gl::new(piston::shader_version::opengl::OpenGL_3_2),
       al_device: al_device,
       al_ctx: al_ctx,
       colors: colors,
