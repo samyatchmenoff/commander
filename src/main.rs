@@ -11,6 +11,8 @@ extern crate cgmath;
 extern crate openal;
 extern crate libvorbisfile;
 
+use std::cmp::min;
+use std::f64::consts::PI_2;
 use std::i16;
 use std::rand;
 use std::iter::FromIterator;
@@ -23,6 +25,7 @@ use piston::EventIterator;
 use cgmath::{Vector, Vector2, EuclideanVector};
 use cgmath::Point;
 use cgmath::{Aabb, Aabb2};
+use cgmath::rad;
 use openal::al;
 use openal::alc;
 use libvorbisfile as vorbis;
@@ -30,19 +33,22 @@ use libvorbisfile as vorbis;
 static MISSILE_COOLDOWN: uint = 60;
 static MISSILE_LIFETIME: uint = 90;
 static MISSILE_SHOOT_THRESHOLD: f64 = 200.0;
+static FOLLOW_DISTANCE: f64 = 100.0;
+static FLOCK_DISTANCE: f64 = 100.0;
 static SELECT_RADIUS: f64 = 25.0;
 static SPEED: f64 = 50.0;
 
 #[deriving(Show,Clone)]
 struct ShipInput {
-  thrust: Vector2<f64>,
+  thrust: f64,
+  steer: f64,
   shoot: Option<uint>,
   target_pos: Vector2<f64>
 }
 
 impl std::default::Default for ShipInput {
   fn default() -> ShipInput {
-    ShipInput { thrust: Vector2::zero(), shoot: None, target_pos: Vector2::zero() }
+    ShipInput { thrust: 0.0, steer: 0.0, shoot: None, target_pos: Vector2::zero() }
   }
 }
 
@@ -73,12 +79,13 @@ struct Ship {
   shield_health: uint,
   missile_cooldown: uint,
   pos: Vector2<f64>,
-  vel: Vector2<f64>,
-  command: Option<cmd::Command>
+  rot: f64,
+  speed: f64,
+  command: cmd::Command
 }
 
 impl Ship {
-  fn new(name: &str, owner: &str, pos: Vector2<f64>) -> Ship {
+  fn new(name: &str, owner: &str, pos: Vector2<f64>, rot: f64) -> Ship {
     Ship {
       name: name.to_string(),
       owner: owner.to_string(),
@@ -86,9 +93,14 @@ impl Ship {
       shield_health: 100,
       missile_cooldown: MISSILE_COOLDOWN,
       pos: pos,
-      vel: Vector2::new(0.0, 0.0),
-      command: None
+      rot: rot,
+      speed: SPEED,
+      command: cmd::Goto(pos)
     }
+  }
+
+  fn vel(&self) -> Vector2<f64> {
+    Vector2::new(self.speed * self.rot.cos(), self.speed * self.rot.sin())
   }
 }
 
@@ -115,7 +127,11 @@ impl<'r> Universe {
       ships: FromIterator::from_iter(
         Vec::from_fn(10, |i| {
           let (name, owner) = if i % 2 == 0 { ("Player", "player") } else { ("Enemy", "enemy") };
-          (i, Ship::new(name, owner, Vector2::new(rand::random::<f64>() * 600.0 + 100.0, rand::random::<f64>() * 400.0 + 100.0)))
+          (i, Ship::new(name,
+                        owner,
+                        Vector2::new(rand::random::<f64>() * 600.0 + 100.0,
+                                     rand::random::<f64>() * 400.0 + 100.0),
+                        rand::random::<f64>() * PI_2))
         }).move_iter()
       ),
       missiles: Vec::new()
@@ -192,13 +208,13 @@ impl<'r> App<'r> {
         let ship_inputs: HashMap<uint,ShipInput> = FromIterator::from_iter(
           self.universe.ships.iter().map(|(&ship_id, ship)| {
             let (target_pos, shoot) = match ship.command {
-              Some(cmd::Goto(pos)) => {
+              cmd::Goto(pos) => {
                 (pos, None)
               }
-              Some(cmd::Follow(target_ship_id)) => {
+              cmd::Follow(target_ship_id) => {
                 (self.universe.ships.find(&target_ship_id).map(|s| s.pos).unwrap_or(ship.pos), None)
               }
-              Some(cmd::Attack(enemy_ship_id)) => {
+              cmd::Attack(enemy_ship_id) => {
                 let pos = self.universe.ships.find(&enemy_ship_id).map(|s| s.pos).unwrap_or(ship.pos);
                 if (ship.pos - pos).length2() < MISSILE_SHOOT_THRESHOLD*MISSILE_SHOOT_THRESHOLD {
                   (pos, Some(enemy_ship_id))
@@ -206,20 +222,54 @@ impl<'r> App<'r> {
                   (pos, None)
                 }
               }
-              _ => (ship.pos, None)
             };
 
-            let min_dist = match ship.command {
-              Some(cmd::Attack(_)) => MISSILE_SHOOT_THRESHOLD * 0.75,
-              Some(cmd::Follow(_)) => 50.0,
-              _ => 10.0
-            };
+            let seperation_v = self.universe.ships.iter().filter_map(|(&other_id, other)| {
+              let dist2 = (ship.pos - other.pos).length2();
+              if other_id == ship_id || dist2 > FLOCK_DISTANCE*FLOCK_DISTANCE {
+                None
+              } else {
+                Some((ship.pos - other.pos).div_s(dist2))
+              }
+            }).fold(Vector2::zero(), |b,a| a + b);
 
-            let diff = target_pos - ship.pos;
-            let dist = diff.length();
-            let thrust = if dist < min_dist { Vector2::new(0.0, 0.0) } else { diff.mul_s(SPEED / dist) };
+            let alignment_v = self.universe.ships.iter().filter_map(|(&other_id, other)| {
+              let dist2 = (ship.pos - other.pos).length2();
+              if other_id == ship_id || dist2 > FLOCK_DISTANCE*FLOCK_DISTANCE {
+                None
+              } else {
+                Some((other.vel() - ship.vel()).div_s(dist2))
+              }
+            }).fold(Vector2::zero(), |b,a| a + b);
+
+            let cohesion_v = self.universe.ships.iter().filter_map(|(&other_id, other)| {
+              let dist2 = (ship.pos - other.pos).length2();
+              if other_id == ship_id || dist2 > FLOCK_DISTANCE*FLOCK_DISTANCE {
+                None
+              } else {
+                Some(Vector2::zero())//None//Some((other.vel - ship.vel).div_s(dist2))
+              }
+            }).fold(Vector2::zero(), |b,a| a + b);
+
+            let goal_dist2 = (target_pos - ship.pos).length2();
+            let goal_v: Vector2<f64> = if goal_dist2 > 1.0 {
+              (target_pos - ship.pos).normalize()
+            } else {
+              Vector2::zero()
+            };
+      
+            let steer_v = seperation_v.mul_s(200.0) +
+                          alignment_v.mul_s(50.0) +
+                          cohesion_v.mul_s(50.0) +
+                          goal_v.mul_s(20.0);
+
+            let steer = ship.vel().angle(&steer_v) + rad(rand::random::<f64>() * 0.1);
+
+            let thrust = 0.0;
+
             (ship_id, ShipInput {
               thrust: thrust,
+              steer: steer.s,
               shoot: shoot,
               target_pos: Vector2::zero()
             })
@@ -231,8 +281,9 @@ impl<'r> App<'r> {
         for (ship_id, input) in ship_inputs.iter() {
           ships.find_mut(ship_id).with(|ship| {
             ship.missile_cooldown = ship.missile_cooldown.checked_sub(&1).unwrap_or(0);
-            ship.vel = ship.vel.mul_s(0.8) + input.thrust;
-            ship.pos = ship.pos + ship.vel.div_s(60.0);
+            ship.speed = ship.speed + input.thrust / 60.0;
+            ship.rot = ship.rot + input.steer / 60.0;
+            ship.pos = ship.pos + ship.vel().div_s(60.0);
             match (input.shoot, ship.missile_cooldown == 0) {
               (Some(target_ship_id), true) => {
                 did_shoot = true;
@@ -285,13 +336,13 @@ impl<'r> App<'r> {
       c.rect(ship.pos.x - 5.0, ship.pos.y - 5.0, 10.0, 10.0).rgb(r, g, b).draw(&mut self.gl);
 
       match ship.command {
-        Some(cmd::Goto(pos)) => {
+        cmd::Goto(pos) => {
           c.line(ship.pos.x, ship.pos.y, pos.x, pos.y)
             .bevel_border_radius(1.0)
             .rgb(0.5, 0.5, 1.0)
             .draw(&mut self.gl);
         }
-        Some(cmd::Follow(target_ship_id)) => {
+        cmd::Follow(target_ship_id) => {
           let p = self.universe.ships.find(&target_ship_id).map(|s| s.pos);
           match p {
             Some(pos) => {
@@ -303,7 +354,7 @@ impl<'r> App<'r> {
             None => {}
           }
         }
-        Some(cmd::Attack(target_ship_id)) => {
+        cmd::Attack(target_ship_id) => {
           let p = self.universe.ships.find(&target_ship_id).map(|s| s.pos);
           match p {
             Some(pos) => {
@@ -315,8 +366,7 @@ impl<'r> App<'r> {
             None => {}
           }
         }
-        None => {}
-      };
+      }
     }
 
     for ship_id in self.selected_ships.iter() {
@@ -424,7 +474,7 @@ impl<'r> App<'r> {
 
       for ship_id in self.selected_ships.iter() {
         self.universe.ships.find_mut(ship_id).with(|s| {
-          s.command = Some(command);
+          s.command = command;
         });
       }
     }
@@ -522,4 +572,12 @@ fn load_sound(filename: &str) -> al::Source {
   let source = al::Source::gen();
   source.queue_buffer(&buffer);
   return source;
+}
+
+fn pmin<T: PartialOrd>(v1: T, v2: T) -> T {
+  if v1.lt(&v2) { v1 } else { v2 }
+}
+
+fn pmax<T: PartialOrd>(v1: T, v2: T) -> T {
+  if v2.lt(&v1) { v1 } else { v2 }
 }
