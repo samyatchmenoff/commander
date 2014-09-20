@@ -3,7 +3,6 @@
 #![feature(globs)]
 #![feature(default_type_params)]
 
-extern crate graphics;
 extern crate piston;
 extern crate glfw_game_window;
 extern crate opengl_graphics;
@@ -20,7 +19,7 @@ use std::collections::{HashMap,HashSet};
 use std::default::Default;
 use std::hash::{Hash,Hasher};
 use std::io::File;
-use graphics::*;
+use piston::graphics::*;
 use piston::EventIterator;
 use cgmath::{Vector, Vector2, EuclideanVector};
 use cgmath::Point;
@@ -253,7 +252,7 @@ impl<'r> App<'r> {
 
             let goal_dist2 = (target_pos - ship.pos).length2();
             let goal_v: Vector2<f64> = if goal_dist2 > 1.0 {
-              (target_pos - ship.pos).normalize()
+              (target_pos - ship.pos)
             } else {
               Vector2::zero()
             };
@@ -261,7 +260,7 @@ impl<'r> App<'r> {
             let steer_v = seperation_v.mul_s(200.0) +
                           alignment_v.mul_s(50.0) +
                           cohesion_v.mul_s(50.0) +
-                          goal_v.mul_s(20.0);
+                          goal_v.mul_s(1.0);
 
             let steer = ship.vel().angle(&steer_v) + rad(rand::random::<f64>() * 0.1);
 
