@@ -324,22 +324,22 @@ impl App {
   fn render(&mut self, args: &piston::event::RenderArgs) {
     self.gl.viewport(0, 0, 2 * args.width as i32, 2 * args.height as i32);
 
-    let ref c = Context::abs(args.width as f64, args.height as f64);
+    let mut c = Context::abs(args.width as f64, args.height as f64);
+    c.draw_state = c.draw_state.blend(draw_state::BlendPreset::Alpha);
     
-    let identity = math::identity();
-
     clear([0.1, 0.1, 0.2, 1.0], &mut self.gl);
 
     for ship in self.universe.ships.values() {
       let colors = &self.colors;
       let (r,g,b) = colors.get(&ship.owner).unwrap_or(&(1.0, 1.0, 1.0)).clone();
-      rectangle([r,g,b,1.0], [ship.pos.x - 5.0, ship.pos.y - 5.0, 10.0, 10.0], identity, &mut self.gl);
+
+      rectangle([r,g,b,1.0], [ship.pos.x - 5.0, ship.pos.y - 5.0, 10.0, 10.0], c.transform, &mut self.gl);
       //c.rect(ship.pos.x - 5.0, ship.pos.y - 5.0, 10.0, 10.0).rgb(r, g, b).draw(&mut self.gl);
 
       match ship.command {
         Command::Goto(pos) => {
           line::Line::new([0.5, 0.5, 1.0, 1.0], 1.0)
-            .draw([ship.pos.x, ship.pos.y, pos.x, pos.y], &c.draw_state, identity, &mut self.gl);
+            .draw([ship.pos.x, ship.pos.y, pos.x, pos.y], &c.draw_state, c.transform, &mut self.gl);
         }
         Command::Follow(target_ship_id) => {
           let p = self.universe.ships.get(&target_ship_id).map(|s| s.pos);
@@ -349,7 +349,7 @@ impl App {
                 .draw(
                   [ship.pos.x, ship.pos.y, pos.x, pos.y],
                   &c.draw_state,
-                  identity,
+                  c.transform,
                   &mut self.gl);
             }
             None => {}
@@ -361,7 +361,7 @@ impl App {
               .draw(
                 [ship.pos.x, ship.pos.y, pos.x, pos.y],
                 &c.draw_state,
-                identity,
+                c.transform,
                 &mut self.gl);
           }
         }
@@ -372,9 +372,9 @@ impl App {
       if let Some(ship) = self.universe.ships.get(ship_id) {
         ellipse::Ellipse::new([0.7, 1.0, 0.7, 0.4])
           .draw(
-            [ship.pos.x, ship.pos.y, ship.pos.x + SELECT_RADIUS, ship.pos.y + SELECT_RADIUS],
+            [ship.pos.x - SELECT_RADIUS, ship.pos.y - SELECT_RADIUS, 2.0 * SELECT_RADIUS, 2.0 * SELECT_RADIUS],
             &c.draw_state,
-            identity,
+            c.transform,
             &mut self.gl);
       }
     }
@@ -393,7 +393,7 @@ impl App {
         .draw(
           [m.pos.x, m.pos.y, m.pos.x + 5.0, m.pos.y + 5.0],
           &c.draw_state,
-          identity,
+          c.transform,
           &mut self.gl);
     }
 
@@ -404,29 +404,18 @@ impl App {
       );
       for ship in self.universe.ships.values() {
         if ship.owner == "player" && select_rect.contains(&Point::from_vec(&ship.pos)) {
-          rectangle(
-            [0.7, 0.5, 1.0, 0.3],
-            [
-              ship.pos.x - SELECT_RADIUS,
-              ship.pos.y - SELECT_RADIUS,
-              ship.pos.x + SELECT_RADIUS,
-              ship.pos.y + SELECT_RADIUS
-            ],
-            identity,
-            &mut self.gl);
+          rectangle::Rectangle::new([0.7, 0.5, 1.0, 0.3])
+            .draw(
+              [
+                ship.pos.x - SELECT_RADIUS,
+                ship.pos.y - SELECT_RADIUS,
+                2.0 * SELECT_RADIUS,
+                2.0 * SELECT_RADIUS
+              ],
+              &c.draw_state, c.transform, &mut self.gl);
         }
       }
-      rectangle(
-        [
-          self.input_state.mouse_position.x as f32,
-          self.input_state.mouse_position.y as f32,
-          (self.input_state.mouse_press_position.x - self.input_state.mouse_position.x) as f32,
-          (self.input_state.mouse_press_position.y - self.input_state.mouse_position.y) as f32
-        ],
-        [0.5, 0.5, 0.6, 0.5],
-        identity,
-        &mut self.gl);
-      rectangle::Rectangle::new_round([0.5, 0.5, 0.6, 1.0], 5.0)
+      rectangle::Rectangle::new_round([0.5, 0.5, 0.6, 0.5], 5.0)
         .draw(
           [
             self.input_state.mouse_position.x,
@@ -434,7 +423,7 @@ impl App {
             self.input_state.mouse_press_position.x - self.input_state.mouse_position.x,
             self.input_state.mouse_press_position.y - self.input_state.mouse_position.y
           ],
-          &c.draw_state, identity, &mut self.gl);
+          &c.draw_state, c.transform, &mut self.gl);
     }
   }
 
@@ -514,7 +503,18 @@ fn ship_at_pos<'r, I: Iterator<Item=(&'r u32, &'r Ship)>>(iter: I, pos: Vector2<
       None
     }
   })
-    .min_by(|&(_, _, dist2)| dist2 as i64)
+    .fold(None, |min, (ship_id, ship, dist2)| {
+      match min {
+        Some((nearest_id, nearest_ship, nearest_dist2)) => {
+          if dist2 < nearest_dist2 {
+            Some((ship_id, ship, dist2))
+          } else {
+            Some((nearest_id, nearest_ship, nearest_dist2))
+          }
+        }
+        None => Some((ship_id, ship, dist2))
+      }
+    })
     .map(|(ship_id, ship, _)| (ship_id, ship))
 }
 
@@ -570,7 +570,7 @@ fn load_sound(filename: &str) -> al::Source {
   }
   let buffer = al::Buffer::gen();
   let sample_freq: f32 = 44100.0;
-  unsafe { buffer.buffer_data(al::Format::Mono16, samples.as_slice(), sample_freq as al::ALsizei) };
+  unsafe { buffer.buffer_data(al::Format::Mono16, &*samples, sample_freq as al::ALsizei) };
 
   let source = al::Source::gen();
   source.queue_buffer(&buffer);
