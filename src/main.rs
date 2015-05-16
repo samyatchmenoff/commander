@@ -1,86 +1,88 @@
-#![license = "MIT"]
+//#![license = "MIT"]
 
-#![feature(globs)]
-#![feature(default_type_params)]
-
+extern crate rand;
 extern crate piston;
-extern crate glfw_game_window;
+extern crate graphics;
+extern crate glfw_window;
 extern crate opengl_graphics;
 extern crate cgmath;
 extern crate openal;
-extern crate libvorbisfile;
+extern crate vorbisfile;
 
 use std::cmp::min;
-use std::f64::consts::PI_2;
+use std::f64::consts::FRAC_2_PI;
 use std::i16;
-use std::rand;
 use std::iter::FromIterator;
+use std::iter::Iterator;
 use std::collections::{HashMap,HashSet};
 use std::default::Default;
 use std::hash::{Hash,Hasher};
-use std::io::File;
-use piston::graphics::*;
-use piston::EventIterator;
-use cgmath::{Vector, Vector2, EuclideanVector};
+use std::fs::File;
+use rand::random;
+use piston::window::{WindowSettings, Size};
+use piston::event::*;
+use graphics::*;
+use cgmath::{Vector, Vector2, EuclideanVector, zero};
+use cgmath::Zero;
 use cgmath::Point;
 use cgmath::{Aabb, Aabb2};
 use cgmath::rad;
 use openal::al;
 use openal::alc;
-use libvorbisfile as vorbis;
+use vorbisfile as vorbis;
 
-static MISSILE_COOLDOWN: uint = 60;
-static MISSILE_LIFETIME: uint = 90;
+static MISSILE_COOLDOWN: u32 = 60;
+static MISSILE_LIFETIME: u32 = 90;
 static MISSILE_SHOOT_THRESHOLD: f64 = 200.0;
 static FOLLOW_DISTANCE: f64 = 100.0;
 static FLOCK_DISTANCE: f64 = 100.0;
 static SELECT_RADIUS: f64 = 25.0;
 static SPEED: f64 = 50.0;
 
-#[deriving(Show,Clone)]
+#[derive(Debug,Clone)]
 struct ShipInput {
   thrust: f64,
   steer: f64,
-  shoot: Option<uint>,
+  shoot: Option<u32>,
   target_pos: Vector2<f64>
 }
 
 impl std::default::Default for ShipInput {
   fn default() -> ShipInput {
-    ShipInput { thrust: 0.0, steer: 0.0, shoot: None, target_pos: Vector2::zero() }
+    ShipInput { thrust: 0.0, steer: 0.0, shoot: None, target_pos: zero() }
   }
 }
 
-#[deriving(Show)]
+#[derive(Debug)]
 struct Missile {
   pos: Vector2<f64>,
   vel: Vector2<f64>,
-  target_ship_id: uint,
-  age: uint
+  target_ship_id: u32,
+  age: u32
 }
 
 impl Missile {
-  fn new(pos: Vector2<f64>, target_ship_id: uint) -> Missile {
+  fn new(pos: Vector2<f64>, target_ship_id: u32) -> Missile {
     Missile {
       pos: pos,
-      vel: Vector2::zero(),
+      vel: zero(),
       target_ship_id: target_ship_id,
       age: 0
     }
   }
 }
 
-#[deriving(Show)]
+#[derive(Debug)]
 struct Ship {
   name: String,
   owner: String,
-  hull_health: uint,
-  shield_health: uint,
-  missile_cooldown: uint,
+  hull_health: u32,
+  shield_health: u32,
+  missile_cooldown: u32,
   pos: Vector2<f64>,
   rot: f64,
   speed: f64,
-  command: cmd::Command
+  command: Command
 }
 
 impl Ship {
@@ -94,7 +96,7 @@ impl Ship {
       pos: pos,
       rot: rot,
       speed: SPEED,
-      command: cmd::Goto(pos)
+      command: Command::Goto(pos)
     }
   }
 
@@ -103,36 +105,32 @@ impl Ship {
   }
 }
 
-mod cmd {
-  use cgmath::Vector2;
-
-  #[deriving(Show)]
-  pub enum Command {
-    Goto(Vector2<f64>),     // (pos)
-    Follow(uint),           // (target_ship_id)
-    Attack(uint),           // (target_ship_id)
-  }
+#[derive(Debug,Clone)]
+enum Command {
+  Goto(Vector2<f64>),     // (pos)
+  Follow(u32),           // (target_ship_id)
+  Attack(u32),           // (target_ship_id)
 }
+impl Copy for Command {}
 
-#[deriving(Show)]
+#[derive(Debug)]
 struct Universe {
-  pub ships: HashMap<uint,Ship>,
+  pub ships: HashMap<u32,Ship>,
   pub missiles: Vec<Missile>
 }
 
 impl<'r> Universe {
   fn new() -> Universe {
     Universe {
-      ships: FromIterator::from_iter(
-        Vec::from_fn(10, |i| {
+      ships:
+        (0..10).map(|i| {
           let (name, owner) = if i % 2 == 0 { ("Player", "player") } else { ("Enemy", "enemy") };
           (i, Ship::new(name,
                         owner,
-                        Vector2::new(rand::random::<f64>() * 600.0 + 100.0,
-                                     rand::random::<f64>() * 400.0 + 100.0),
-                        rand::random::<f64>() * PI_2))
-        }).move_iter()
-      ),
+                        Vector2::new(rand::random::<f64>() * 700.0 + 100.0,
+                                     rand::random::<f64>() * 600.0 + 100.0),
+                        rand::random::<f64>() * FRAC_2_PI))
+        }).collect::<HashMap<u32,Ship>>(),
       missiles: Vec::new()
     }
   }
@@ -141,14 +139,14 @@ impl<'r> Universe {
 struct InputState {
   mouse_position: Vector2<f64>,
   mouse_press_position: Vector2<f64>,
-  mouse_button_state: HashMap<piston::input::mouse::Button,bool>
+  mouse_button_state: HashMap<piston::input::MouseButton,bool>
 }
 
 impl InputState {
   fn new() -> InputState {
     InputState {
-      mouse_position: Vector2::zero(),
-      mouse_press_position: Vector2::zero(),
+      mouse_position: zero(),
+      mouse_press_position: zero(),
       mouse_button_state: HashMap::new()
     }
   }
@@ -159,22 +157,22 @@ enum GameState {
   Simulating,
 }
 
-pub struct App<'r> {
+pub struct App {
   game_state: GameState,
   universe: Universe,
-  selected_ships: HashSet<uint>,
+  selected_ships: HashSet<u32>,
   input_state: InputState,
-  gl: opengl_graphics::Gl,
+  gl: opengl_graphics::GlGraphics,
   al_device: alc::Device,
   al_ctx: alc::Context,
   colors: HashMap<String,(f32,f32,f32)>,
   sounds: HashMap<String,al::Source>
 }
 
-impl<'r> App<'r> {
-  fn new() -> App<'r> {
+impl App {
+  fn new() -> App {
     let al_device = alc::Device::open(None).expect("Could not open audio device");
-    let al_ctx = al_device.create_context([]).expect("Could not create OpenAL context");
+    let al_ctx = al_device.create_context(&[]).expect("Could not create OpenAL context");
     al_ctx.make_current();
 
     let mut colors = HashMap::new();
@@ -184,11 +182,11 @@ impl<'r> App<'r> {
     sounds.insert("shoot".to_string(), load_sound("shoot.ogg"));
 
     App {
-      game_state: Simulating,
+      game_state: GameState::Simulating,
       universe: Universe::new(),
       selected_ships: HashSet::new(),
       input_state: InputState::new(),
-      gl: opengl_graphics::Gl::new(piston::shader_version::opengl::OpenGL_3_2),
+      gl: opengl_graphics::GlGraphics::new(opengl_graphics::OpenGL::_3_2),
       al_device: al_device,
       al_ctx: al_ctx,
       colors: colors,
@@ -197,24 +195,24 @@ impl<'r> App<'r> {
   }
 }
 
-impl<'r> App<'r> {
+impl App {
   fn update(&mut self) {
     match self.game_state {
-      Paused => {},
-      Simulating => {
+      GameState::Paused => {},
+      GameState::Simulating => {
         let mut did_shoot = false;
 
-        let ship_inputs: HashMap<uint,ShipInput> = FromIterator::from_iter(
+        let ship_inputs: HashMap<u32,ShipInput> = HashMap::from_iter(
           self.universe.ships.iter().map(|(&ship_id, ship)| {
             let (target_pos, shoot) = match ship.command {
-              cmd::Goto(pos) => {
+              Command::Goto(pos) => {
                 (pos, None)
               }
-              cmd::Follow(target_ship_id) => {
-                (self.universe.ships.find(&target_ship_id).map(|s| s.pos).unwrap_or(ship.pos), None)
+              Command::Follow(target_ship_id) => {
+                (self.universe.ships.get(&target_ship_id).map(|s| s.pos).unwrap_or(ship.pos), None)
               }
-              cmd::Attack(enemy_ship_id) => {
-                let pos = self.universe.ships.find(&enemy_ship_id).map(|s| s.pos).unwrap_or(ship.pos);
+              Command::Attack(enemy_ship_id) => {
+                let pos = self.universe.ships.get(&enemy_ship_id).map(|s| s.pos).unwrap_or(ship.pos);
                 if (ship.pos - pos).length2() < MISSILE_SHOOT_THRESHOLD*MISSILE_SHOOT_THRESHOLD {
                   (pos, Some(enemy_ship_id))
                 } else {
@@ -230,7 +228,7 @@ impl<'r> App<'r> {
               } else {
                 Some((ship.pos - other.pos).div_s(dist2))
               }
-            }).fold(Vector2::zero(), |b,a| a + b);
+            }).fold(zero(), |b,a| a + b);
 
             let alignment_v = self.universe.ships.iter().filter_map(|(&other_id, other)| {
               let dist2 = (ship.pos - other.pos).length2();
@@ -239,22 +237,23 @@ impl<'r> App<'r> {
               } else {
                 Some((other.vel() - ship.vel()).div_s(dist2))
               }
-            }).fold(Vector2::zero(), |b,a| a + b);
+            }).fold(zero(), |b,a| a + b);
 
-            let cohesion_v = self.universe.ships.iter().filter_map(|(&other_id, other)| {
-              let dist2 = (ship.pos - other.pos).length2();
-              if other_id == ship_id || dist2 > FLOCK_DISTANCE*FLOCK_DISTANCE {
-                None
-              } else {
-                Some(Vector2::zero())//None//Some((other.vel - ship.vel).div_s(dist2))
-              }
-            }).fold(Vector2::zero(), |b,a| a + b);
+            let cohesion_v: Vector2<f64> =
+              self.universe.ships.iter().filter_map(|(&other_id, other)| {
+                let dist2 = (ship.pos - other.pos).length2();
+                if other_id == ship_id || dist2 > FLOCK_DISTANCE*FLOCK_DISTANCE {
+                  None
+                } else {
+                  Some(Vector2::zero())//None//Some((other.vel - ship.vel).div_s(dist2))
+                }
+              }).fold(zero(), |b,a| a + b);
 
             let goal_dist2 = (target_pos - ship.pos).length2();
             let goal_v: Vector2<f64> = if goal_dist2 > 1.0 {
               (target_pos - ship.pos)
             } else {
-              Vector2::zero()
+              zero()
             };
       
             let steer_v = seperation_v.mul_s(200.0) +
@@ -270,7 +269,7 @@ impl<'r> App<'r> {
               thrust: thrust,
               steer: steer.s,
               shoot: shoot,
-              target_pos: Vector2::zero()
+              target_pos: zero()
             })
           })
         );
@@ -278,8 +277,8 @@ impl<'r> App<'r> {
         let Universe { ships: ref mut ships, missiles: ref mut missiles } = self.universe;
 
         for (ship_id, input) in ship_inputs.iter() {
-          ships.find_mut(ship_id).with(|ship| {
-            ship.missile_cooldown = ship.missile_cooldown.checked_sub(&1).unwrap_or(0);
+          if let Some(ship) = ships.get_mut(ship_id) {
+            ship.missile_cooldown = ship.missile_cooldown.checked_sub(1).unwrap_or(0);
             ship.speed = ship.speed + input.thrust / 60.0;
             ship.rot = ship.rot + input.steer / 60.0;
             ship.pos = ship.pos + ship.vel().div_s(60.0);
@@ -291,11 +290,11 @@ impl<'r> App<'r> {
               }
               _ => {}
             };
-          });
+          };
         }
 
-        for m in missiles.mut_iter() {
-          match ships.find(&m.target_ship_id) {
+        for m in missiles.iter_mut() {
+          match ships.get(&m.target_ship_id) {
             Some(target_ship) => {
               let diff = target_ship.pos - m.pos;
               let dist = diff.length();
@@ -316,130 +315,152 @@ impl<'r> App<'r> {
         missiles.retain(|m| { m.age < MISSILE_LIFETIME });
 
         if did_shoot {
-          self.sounds.find_mut(&"shoot".to_string()).unwrap().play();
+          self.sounds.get_mut(&"shoot".to_string()).unwrap().play();
         }
       }
     }
   }
 
-  fn render(&mut self, args: &piston::RenderArgs) {
+  fn render(&mut self, args: &piston::event::RenderArgs) {
     self.gl.viewport(0, 0, 2 * args.width as i32, 2 * args.height as i32);
 
     let ref c = Context::abs(args.width as f64, args.height as f64);
+    
+    let identity = math::identity();
 
-    c.rgb(0.1, 0.1, 0.2).draw(&mut self.gl);
+    clear([0.1, 0.1, 0.2, 1.0], &mut self.gl);
 
     for ship in self.universe.ships.values() {
       let colors = &self.colors;
-      let (r,g,b) = colors.find(&ship.owner).unwrap_or(&(1.0, 1.0, 1.0)).clone();
-      c.rect(ship.pos.x - 5.0, ship.pos.y - 5.0, 10.0, 10.0).rgb(r, g, b).draw(&mut self.gl);
+      let (r,g,b) = colors.get(&ship.owner).unwrap_or(&(1.0, 1.0, 1.0)).clone();
+      rectangle([r,g,b,1.0], [ship.pos.x - 5.0, ship.pos.y - 5.0, 10.0, 10.0], identity, &mut self.gl);
+      //c.rect(ship.pos.x - 5.0, ship.pos.y - 5.0, 10.0, 10.0).rgb(r, g, b).draw(&mut self.gl);
 
       match ship.command {
-        cmd::Goto(pos) => {
-          c.line(ship.pos.x, ship.pos.y, pos.x, pos.y)
-            .bevel_border_radius(1.0)
-            .rgb(0.5, 0.5, 1.0)
-            .draw(&mut self.gl);
+        Command::Goto(pos) => {
+          line::Line::new([0.5, 0.5, 1.0, 1.0], 1.0)
+            .draw([ship.pos.x, ship.pos.y, pos.x, pos.y], &c.draw_state, identity, &mut self.gl);
         }
-        cmd::Follow(target_ship_id) => {
-          let p = self.universe.ships.find(&target_ship_id).map(|s| s.pos);
+        Command::Follow(target_ship_id) => {
+          let p = self.universe.ships.get(&target_ship_id).map(|s| s.pos);
           match p {
             Some(pos) => {
-              c.line(ship.pos.x, ship.pos.y, pos.x, pos.y)
-                .bevel_border_radius(1.0)
-                .rgb(0.5, 1.0, 0.5)
-                .draw(&mut self.gl);
+              line::Line::new([0.5, 1.0, 0.5, 1.0], 1.0)
+                .draw(
+                  [ship.pos.x, ship.pos.y, pos.x, pos.y],
+                  &c.draw_state,
+                  identity,
+                  &mut self.gl);
             }
             None => {}
           }
         }
-        cmd::Attack(target_ship_id) => {
-          let p = self.universe.ships.find(&target_ship_id).map(|s| s.pos);
-          match p {
-            Some(pos) => {
-              c.line(ship.pos.x, ship.pos.y, pos.x, pos.y)
-                .bevel_border_radius(1.0)
-                .rgb(1.0, 0.5, 0.5)
-                .draw(&mut self.gl);
-            }
-            None => {}
+        Command::Attack(target_ship_id) => {
+          if let Some(pos) = self.universe.ships.get(&target_ship_id).map(|s| s.pos) {
+            line::Line::new([1.0, 0.5, 0.5, 1.0], 1.0)
+              .draw(
+                [ship.pos.x, ship.pos.y, pos.x, pos.y],
+                &c.draw_state,
+                identity,
+                &mut self.gl);
           }
         }
       }
     }
 
     for ship_id in self.selected_ships.iter() {
-      match self.universe.ships.find(ship_id) {
-        Some(ship) => {
-          c.circle(ship.pos.x, ship.pos.y, SELECT_RADIUS).rgba(0.7, 1.0, 0.7, 0.4).draw(&mut self.gl);
-        }
-        None => {}
+      if let Some(ship) = self.universe.ships.get(ship_id) {
+        ellipse::Ellipse::new([0.7, 1.0, 0.7, 0.4])
+          .draw(
+            [ship.pos.x, ship.pos.y, ship.pos.x + SELECT_RADIUS, ship.pos.y + SELECT_RADIUS],
+            &c.draw_state,
+            identity,
+            &mut self.gl);
       }
     }
 
     match ship_at_pos(self.universe.ships.iter(), self.input_state.mouse_position) {
       Some((_, ship)) => {
-        c.rect(ship.pos.x - SELECT_RADIUS, ship.pos.y - SELECT_RADIUS, SELECT_RADIUS * 2.0, SELECT_RADIUS * 2.0)
-          .rgba(0.7, 0.5, 1.0, 0.3)
-          .draw(&mut self.gl);
+        //c.rect(ship.pos.x - SELECT_RADIUS, ship.pos.y - SELECT_RADIUS, SELECT_RADIUS * 2.0, SELECT_RADIUS * 2.0)
+        //  .rgba(0.7, 0.5, 1.0, 0.3)
+        //  .draw(&mut self.gl);
       }
       None => {}
     };
 
     for m in self.universe.missiles.iter() {
-      c.circle(m.pos.x, m.pos.y, 5.0).rgba(1.0, 1.0, 1.0, 1.0).draw(&mut self.gl);
+      ellipse::Ellipse::new([1.0, 1.0, 1.0, 1.0])
+        .draw(
+          [m.pos.x, m.pos.y, m.pos.x + 5.0, m.pos.y + 5.0],
+          &c.draw_state,
+          identity,
+          &mut self.gl);
     }
 
-    if self.input_state.mouse_button_state.find_or_default(&piston::input::mouse::Left) == true {
+    if self.input_state.mouse_button_state.get_or_default(&piston::input::MouseButton::Left) == true {
       let select_rect: Aabb2<f64> = Aabb2::new(
         Point::from_vec(&self.input_state.mouse_position),
         Point::from_vec(&self.input_state.mouse_press_position)
       );
       for ship in self.universe.ships.values() {
-        if ship.owner.as_slice() == "player" && select_rect.contains(&Point::from_vec(&ship.pos)) {
-          c.rect(ship.pos.x - SELECT_RADIUS, ship.pos.y - SELECT_RADIUS, SELECT_RADIUS * 2.0, SELECT_RADIUS * 2.0)
-            .rgba(0.7, 0.5, 1.0, 0.3)
-            .draw(&mut self.gl);
+        if ship.owner == "player" && select_rect.contains(&Point::from_vec(&ship.pos)) {
+          rectangle(
+            [0.7, 0.5, 1.0, 0.3],
+            [
+              ship.pos.x - SELECT_RADIUS,
+              ship.pos.y - SELECT_RADIUS,
+              ship.pos.x + SELECT_RADIUS,
+              ship.pos.y + SELECT_RADIUS
+            ],
+            identity,
+            &mut self.gl);
         }
       }
-      c.rect(
-        self.input_state.mouse_position.x,
-        self.input_state.mouse_position.y,
-        self.input_state.mouse_press_position.x - self.input_state.mouse_position.x,
-        self.input_state.mouse_press_position.y - self.input_state.mouse_position.y
-      ).rgba(0.5, 0.5, 0.6, 0.5).draw(&mut self.gl);
-      c.rect(
-        self.input_state.mouse_position.x,
-        self.input_state.mouse_position.y,
-        self.input_state.mouse_press_position.x - self.input_state.mouse_position.x,
-        self.input_state.mouse_press_position.y - self.input_state.mouse_position.y
-      ).border_radius(1.0).rgba(0.5, 0.5, 0.6, 1.0).draw(&mut self.gl);
+      rectangle(
+        [
+          self.input_state.mouse_position.x as f32,
+          self.input_state.mouse_position.y as f32,
+          (self.input_state.mouse_press_position.x - self.input_state.mouse_position.x) as f32,
+          (self.input_state.mouse_press_position.y - self.input_state.mouse_position.y) as f32
+        ],
+        [0.5, 0.5, 0.6, 0.5],
+        identity,
+        &mut self.gl);
+      rectangle::Rectangle::new_round([0.5, 0.5, 0.6, 1.0], 5.0)
+        .draw(
+          [
+            self.input_state.mouse_position.x,
+            self.input_state.mouse_position.y,
+            self.input_state.mouse_press_position.x - self.input_state.mouse_position.x,
+            self.input_state.mouse_press_position.y - self.input_state.mouse_position.y
+          ],
+          &c.draw_state, identity, &mut self.gl);
     }
   }
 
   fn key_press(&mut self, key: piston::input::keyboard::Key) {
-    match (self.game_state, key) {
-      (Paused, piston::input::keyboard::Space) => {
-        self.game_state = Simulating;
+    match (&self.game_state, key) {
+      (&GameState::Paused, piston::input::keyboard::Key::Space) => {
+        self.game_state = GameState::Simulating;
       }
-      (Simulating, piston::input::keyboard::Space) => {
-        self.game_state = Paused;
+      (&GameState::Simulating, piston::input::keyboard::Key::Space) => {
+        self.game_state = GameState::Paused;
       }
       _ => {}
     }
   }
 
-  fn mouse_release(&mut self, button: piston::input::mouse::Button) {
+  fn mouse_release(&mut self, button: piston::input::MouseButton) {
     self.input_state.mouse_button_state.insert(button, false);
 
-    if button == piston::input::mouse::Left {
+    if button == piston::input::MouseButton::Left {
       let select_rect: Aabb2<f64> = Aabb2::new(
         Point::from_vec(&self.input_state.mouse_position),
         Point::from_vec(&self.input_state.mouse_press_position)
       );
 
       self.selected_ships = self.universe.ships.iter().filter_map(|(ship_id, ship)| {
-        if ship.owner.as_slice() == "player" && select_rect.contains(&Point::from_vec(&ship.pos)) {
+        if ship.owner == "player" && select_rect.contains(&Point::from_vec(&ship.pos)) {
           Some(*ship_id)
         } else {
           None
@@ -448,33 +469,33 @@ impl<'r> App<'r> {
     }
   }
 
-  fn mouse_press(&mut self, button: piston::input::mouse::Button) {
+  fn mouse_press(&mut self, button: piston::input::MouseButton) {
     self.input_state.mouse_button_state.insert(button, true);
     self.input_state.mouse_press_position = self.input_state.mouse_position;
 
     let pos = self.input_state.mouse_position;
 
-    if button == piston::input::mouse::Right {
+    if button == piston::input::MouseButton::Right {
       let command = {
         let selected = ship_at_pos(self.universe.ships.iter(), pos);
         match selected {
           Some((&new_ship_id, new_ship)) => {
-            if new_ship.owner.as_slice() == "player" {
-              cmd::Follow(new_ship_id)
+            if new_ship.owner == "player" {
+              Command::Follow(new_ship_id)
             } else {
-              cmd::Attack(new_ship_id)
+              Command::Attack(new_ship_id)
             }
           }
           None => {
-            cmd::Goto(self.input_state.mouse_position)
+            Command::Goto(self.input_state.mouse_position)
           }
         }
       };
 
       for ship_id in self.selected_ships.iter() {
-        self.universe.ships.find_mut(ship_id).with(|s| {
+        if let Some(s) = self.universe.ships.get_mut(ship_id) {
           s.command = command;
-        });
+        }
       }
     }
   }
@@ -484,7 +505,7 @@ impl<'r> App<'r> {
   }
 }
 
-fn ship_at_pos<'r, I: Iterator<(&'r uint, &'r Ship)>>(iter: I, pos: Vector2<f64>) -> Option<(&'r uint, &'r Ship)> {
+fn ship_at_pos<'r, I: Iterator<Item=(&'r u32, &'r Ship)>>(iter: I, pos: Vector2<f64>) -> Option<(&'r u32, &'r Ship)> {
   iter.filter_map(|(ship_id, ship)| {
     let dist2 = (ship.pos - pos).length2();
     if dist2 < SELECT_RADIUS*SELECT_RADIUS {
@@ -493,71 +514,54 @@ fn ship_at_pos<'r, I: Iterator<(&'r uint, &'r Ship)>>(iter: I, pos: Vector2<f64>
       None
     }
   })
-    .min_by(|&(_, _, dist2)| dist2 as int)
+    .min_by(|&(_, _, dist2)| dist2 as i64)
     .map(|(ship_id, ship, _)| (ship_id, ship))
 }
 
 fn main() {
-  let mut window = glfw_game_window::WindowGLFW::new(
-    piston::shader_version::opengl::OpenGL_3_2,
-    piston::WindowSettings {
-      title: "Commander".to_string(),
-      size: [800, 600],
-      fullscreen: false,
-      exit_on_esc: true,
-      samples: 1
-    }
+  let mut window = glfw_window::GlfwWindow::new(
+    opengl_graphics::OpenGL::_3_2,
+    WindowSettings::new("Commander".to_string(), Size { width: 800, height: 600 })
   );
 
   let mut app = App::new();
-  let game_iter_settings = piston::EventSettings {
-    updates_per_second: 60,
-    max_frames_per_second: 60
-  };
 
-  for e in EventIterator::new(&mut window, &game_iter_settings) {
+  for e in window.events() {
     match e {
-      piston::Render(args) => app.render(&args),
-      piston::Update(_) => app.update(),
-      piston::Input(piston::input::Press(piston::input::Keyboard(key))) => app.key_press(key),
-      piston::Input(piston::input::Press(piston::input::Mouse(button))) => app.mouse_press(button),
-      piston::Input(piston::input::Release(piston::input::Mouse(button))) => app.mouse_release(button),
-      piston::Input(piston::input::Move(piston::input::MouseCursor(x, y))) => app.mouse_move(x, y),
-      piston::Input(_) => ()
+      Event::Idle(_) => (),
+      Event::Render(args) => app.render(&args),
+      Event::AfterRender(_) => (),
+      Event::Update(_) => app.update(),
+      Event::Input(piston::input::Input::Press(piston::input::Button::Keyboard(key))) => app.key_press(key),
+      Event::Input(piston::input::Input::Press(piston::input::Button::Mouse(button))) => app.mouse_press(button),
+      Event::Input(piston::input::Input::Release(piston::input::Button::Mouse(button))) => app.mouse_release(button),
+      Event::Input(piston::input::Input::Move(piston::input::Motion::MouseCursor(x, y))) => app.mouse_move(x, y),
+      Event::Input(_) => ()
     }
   }
 }
 
-
-trait With<T> {
-  fn with(self, f: |T|);
+trait GetOrDefault<K,V> {
+  fn get_or_default(&self, key: &K) -> V;
 }
 
-impl<T> With<T> for Option<T> {
-  fn with(self, f: |T|) {
-    for x in self.move_iter() { f(x); }
-  }
-}
-
-trait FindOrDefault<K,V> {
-  fn find_or_default(&self, key: &K) -> V;
-}
-
-impl<K: Eq + Hash<S>, V: Default + Clone, S, H: Hasher<S>> FindOrDefault<K,V> for HashMap<K,V,H> {
-  fn find_or_default(&self, key: &K) -> V {
-    self.find_copy(key).unwrap_or_default()
+impl<K: Hash + Eq, V: Default + Clone> GetOrDefault<K,V> for HashMap<K,V> {
+  fn get_or_default(&self, key: &K) -> V {
+    self.get(&key).cloned().unwrap_or_default()
   }
 }
 
 fn load_sound(filename: &str) -> al::Source {
-  use std::slice::Slice;
-  let mut stream = File::open(&Path::new(filename)).unwrap();
+  //use std::slice::Slice;
+  let mut stream = File::open(filename).unwrap();
   let mut vf = vorbis::VorbisFile::new(stream).unwrap();
   let mut samples: Vec<i16> = Vec::new();
   loop {
     match vf.decode() {
       Ok(channels) => {
-        samples.push_all_move(channels[0].iter().map(|x| (x * (i16::MAX - 1) as f32) as i16).collect());
+        samples.extend(
+          channels[0].iter().map(|x| (x * (i16::MAX - 1) as f32) as i16).collect::<Vec<i16>>()
+        );
       }
       _ => {
         break;
@@ -566,7 +570,7 @@ fn load_sound(filename: &str) -> al::Source {
   }
   let buffer = al::Buffer::gen();
   let sample_freq: f32 = 44100.0;
-  unsafe { buffer.buffer_data(al::FormatMono16, samples.as_slice(), sample_freq as al::ALsizei) };
+  unsafe { buffer.buffer_data(al::Format::Mono16, samples.as_slice(), sample_freq as al::ALsizei) };
 
   let source = al::Source::gen();
   source.queue_buffer(&buffer);
